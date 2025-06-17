@@ -47,6 +47,7 @@ class SpotInstanceManager:
             
             # Use run_instances with market options instead of request_spot_instances
             # This allows us to use the launch template which contains our user_data_processor.sh
+            # Override the subnet and security group to ensure they match our current VPC
             response = self.ec2_client.run_instances(
                 MaxCount=1,
                 MinCount=1,
@@ -54,6 +55,8 @@ class SpotInstanceManager:
                     'LaunchTemplateId': self.launch_template_id,
                     'Version': '$Latest'
                 },
+                SubnetId=self.subnet_id,  # Override subnet from discovery
+                SecurityGroupIds=[self.security_group_id],  # Override security group from discovery
                 InstanceMarketOptions={
                     'MarketType': 'spot',
                     'SpotOptions': {
