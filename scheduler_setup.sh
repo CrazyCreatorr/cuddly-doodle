@@ -12,8 +12,15 @@ LOG_FILE="/var/log/scheduler-setup.log"
 REGION="${1:-ap-south-1}"  # Use first argument as region or default to ap-south-1
 SCRIPTS_DIR="/opt/climate-scheduler"
 
-# Logging functions
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+# Set AWS region environment variables
+export AWS_DEFAULT_REGION="$REGION"
+export AWS_REGION="$REGION"
+
+# Configure AWS CLI default region
+aws configure set default.region "$REGION"
+
+# Logging functions - send logs to stderr and log file to avoid polluting stdout
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE" >&2; }
 error_exit() { log "ERROR: $1"; exit 1; }
 
 # Install required packages
@@ -166,7 +173,7 @@ get_subnet_id() {
     local vpc_id="$1"
     log "Discovering subnet in VPC $vpc_id..."
     
-    # Try to find by tags
+    # Try to find by tags - use exact match for the terraform-created subnet
     for tag_pattern in "aqua-hive-public-subnet" "climate-public"; do
         subnet_id=$(aws ec2 describe-subnets \
             --region "$REGION" \
@@ -175,7 +182,7 @@ get_subnet_id() {
             --output text 2>/dev/null)
         
         if [ "$subnet_id" != "None" ] && [ -n "$subnet_id" ]; then
-            log "Found subnet: $subnet_id"
+            log "Found subnet by tag: $subnet_id"
             echo "$subnet_id"
             return 0
         fi
