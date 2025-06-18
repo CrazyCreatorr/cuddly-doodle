@@ -1,8 +1,6 @@
 #!/bin/bash
-"""
-mb-util installation and tile extraction utility
-Since mb-util might not be available via npm, we'll create our own tile extractor
-"""
+# mb-util installation and tile extraction utility
+# Since mb-util might not be available via npm, we'll create our own tile extractor
 
 # Install Python version of mb-util
 pip3 install mbutil

@@ -89,25 +89,36 @@ install_packages() {
 
 # Clone and setup pipeline scripts from GitHub repository
 setup_pipeline_scripts() {
-    log "Cloning pipeline scripts from GitHub repository..."
+    log "Setting up pipeline scripts..."
     
-    # Clone the repository
-    if git clone "$REPO_URL" "$SCRIPTS_DIR"; then
-        log "Successfully cloned pipeline repository"
-        
-        # Set proper permissions
-        chmod -R 755 "$SCRIPTS_DIR"
-        chown -R ubuntu:ubuntu "$SCRIPTS_DIR"
-        
-        # Change to the repository directory
+    # Check if directory already exists (from bootstrap)
+    if [ -d "$SCRIPTS_DIR" ]; then
+        log "Scripts directory already exists, updating..."
         cd "$SCRIPTS_DIR"
         
-        log "Repository contents:"
-        ls -la | tee -a "$LOG_FILE"
-        
+        # Pull latest changes
+        if git pull origin main; then
+            log "Successfully updated pipeline repository"
+        else
+            log "Failed to pull updates, continuing with existing scripts..."
+        fi
     else
-        error_exit "Failed to clone pipeline repository from $REPO_URL"
+        log "Cloning pipeline scripts from GitHub repository..."
+        # Clone the repository
+        if git clone "$REPO_URL" "$SCRIPTS_DIR"; then
+            log "Successfully cloned pipeline repository"
+            cd "$SCRIPTS_DIR"
+        else
+            error_exit "Failed to clone pipeline repository from $REPO_URL"
+        fi
     fi
+    
+    # Set proper permissions
+    chmod -R 755 "$SCRIPTS_DIR"
+    chown -R ubuntu:ubuntu "$SCRIPTS_DIR"
+    
+    log "Repository contents:"
+    ls -la | tee -a "$LOG_FILE"
 }
 
 # Create or discover S3 buckets for storing processed data
