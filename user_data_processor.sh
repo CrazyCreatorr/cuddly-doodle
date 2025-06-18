@@ -62,6 +62,10 @@ install_packages() {
         global-land-mask>=1.0.0 \
         pandas>=1.5.0 \
         numpy>=1.24.0 \
+        zarr \
+        fsspec \
+        s3fs \
+        netcdf4 \
         cdsapi>=0.6.1 || error_exit "Failed to install Python packages"
     
     # Install tippecanoe for MBTiles generation
@@ -116,6 +120,16 @@ setup_pipeline_scripts() {
     # Set proper permissions
     chmod -R 755 "$SCRIPTS_DIR"
     chown -R ubuntu:ubuntu "$SCRIPTS_DIR"
+    
+    # Create output directories with proper permissions
+    log "Creating output directories..."
+    mkdir -p "$SCRIPTS_DIR/temperature_data_output" "$SCRIPTS_DIR/temperature_mbtiles_output"
+    mkdir -p "$SCRIPTS_DIR/humidity_data_output" "$SCRIPTS_DIR/humidity_mbtiles_output"  
+    mkdir -p "$SCRIPTS_DIR/precipitation_data_output" "$SCRIPTS_DIR/precipitation_mbtiles_output"
+    
+    # Set permissions for output directories
+    chown -R ubuntu:ubuntu "$SCRIPTS_DIR"/*_output
+    chmod -R 755 "$SCRIPTS_DIR"/*_output
     
     log "Repository contents:"
     ls -la | tee -a "$LOG_FILE"
@@ -184,6 +198,28 @@ run_processor() {
     log "Contents of current directory:"
     ls -la | tee -a "$LOG_FILE"
     
+    # Calculate the previous month and year for processing
+    local current_month=$(date +%m)
+    local current_year=$(date +%Y)
+    local target_month
+    local target_year
+    
+    # Remove leading zero from month if present
+    current_month=$((10#$current_month))
+    
+    if [ "$current_month" -eq 1 ]; then
+        # If current month is January, target is December of previous year
+        target_month=12
+        target_year=$((current_year - 1))
+    else
+        # Otherwise, target is previous month of current year
+        target_month=$((current_month - 1))
+        target_year=$current_year
+    fi
+    
+    log "Current date: $current_year-$(printf "%02d" $current_month)"
+    log "Target processing date: $target_year-$(printf "%02d" $target_month)"
+    
     # Define the parameters to process (temperature, humidity, precipitation)
     local script_params=("temperature" "humidity" "precipitation")
     
@@ -214,13 +250,14 @@ run_processor() {
         fi
         
         if [ ! -z "$pipeline_script" ]; then
-            log "Executing pipeline script: $pipeline_script"
+            log "Executing pipeline script: $pipeline_script for $target_year-$(printf "%02d" $target_month)"
             
-            # Make script executable and run it
+            # Make script executable and run it with calculated date parameters
             chmod +x "$pipeline_script" 2>/dev/null || true
             
-            if python3 "$pipeline_script" 2>&1 | tee -a "$LOG_FILE"; then
-                log "Successfully processed $param data"
+            # Execute script with year and month arguments
+            if python3 "$pipeline_script" --start-year "$target_year" --start-month "$target_month" --end-year "$target_year" --end-month "$target_month" 2>&1 | tee -a "$LOG_FILE"; then
+                log "Successfully processed $param data for $target_year-$(printf "%02d" $target_month)"
                 
                 # If MBTiles were generated, upload them to S3
                 if [ ! -z "${CLIMATE_TILES_BUCKET:-}" ]; then
