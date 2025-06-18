@@ -156,28 +156,6 @@ setup_s3_buckets() {
     
     log "Using buckets - Raw: $raw_bucket, Tiles: $tiles_bucket"
 }
-                "Statement": [
-                    {
-                        "Sid": "PublicReadGetObject",
-                        "Effect": "Allow",
-                        "Principal": "*",
-                        "Action": "s3:GetObject",
-                        "Resource": "arn:aws:s3:::'$tiles_bucket'/*"
-                    }
-                ]
-            }'
-            log "Tiles bucket created: $tiles_bucket"
-        else
-            error_exit "Failed to create tiles bucket"
-        fi
-    fi
-    
-    # Export bucket names for use by pipeline scripts
-    export CLIMATE_RAW_BUCKET="$raw_bucket"
-    export CLIMATE_TILES_BUCKET="$tiles_bucket"
-    
-    log "Using buckets - Raw: $raw_bucket, Tiles: $tiles_bucket"
-}
 
 # Run the climate data processing pipelines
 run_processor() {
