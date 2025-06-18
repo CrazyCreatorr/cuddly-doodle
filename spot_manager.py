@@ -30,8 +30,23 @@ class SpotInstanceManager:
         logger.info(f"VPC: {vpc_id}, Security Group: {security_group_id}, Subnet: {subnet_id}")
         logger.info(f"Launch Template: {launch_template_id}")
     
-    def request_spot_instance(self, instance_type='c5.4xlarge', max_price='0.50'):
-        """Request a spot instance for processing using launch template"""
+    def request_spot_instance(self, instance_type='t3.large', max_price='0.50'):
+        """Request a spot instance for processing using launch template with fallback instance types"""
+        # List of instance types to try in order of preference
+        instance_types = [
+            't3.large',     # Most commonly available, good for general workloads
+            't3.xlarge',    # More power if needed
+            'm5.large',     # Alternative general purpose
+            'm5.xlarge',    # More memory
+            'c5.large',     # Compute optimized, smaller
+            'c5.xlarge',    # Compute optimized, medium
+            't2.large'      # Last resort, older generation
+        ]
+        
+        # Start with the requested instance type if not in our list
+        if instance_type not in instance_types:
+            instance_types.insert(0, instance_type)
+        
         try:
             # Calculate current month for processing (process previous month's data)
             now = datetime.now()
@@ -45,44 +60,67 @@ class SpotInstanceManager:
             logger.info(f"Requesting spot instance to process data for {target_year}-{target_month:02d}")
             logger.info(f"Using launch template: {self.launch_template_id}")
             
-            # Use run_instances with market options instead of request_spot_instances
-            # This allows us to use the launch template which contains our user_data_processor.sh
-            # Override the subnet and security group to ensure they match our current VPC
-            response = self.ec2_client.run_instances(
-                MaxCount=1,
-                MinCount=1,
-                LaunchTemplate={
-                    'LaunchTemplateId': self.launch_template_id,
-                    'Version': '$Latest'
-                },
-                SubnetId=self.subnet_id,  # Override subnet from discovery
-                SecurityGroupIds=[self.security_group_id],  # Override security group from discovery
-                InstanceMarketOptions={
-                    'MarketType': 'spot',
-                    'SpotOptions': {
-                        'MaxPrice': max_price,
-                        'SpotInstanceType': 'one-time',
-                        'InstanceInterruptionBehavior': 'terminate'
-                    }
-                },
-                TagSpecifications=[
-                    {
-                        'ResourceType': 'instance',
-                        'Tags': [
-                            {'Key': 'Name', 'Value': 'aqua-hive-processor-spot'},
-                            {'Key': 'Project', 'Value': 'aqua-hive'},
-                            {'Key': 'Type', 'Value': 'processor'},
-                            {'Key': 'ProcessingYear', 'Value': str(target_year)},
-                            {'Key': 'ProcessingMonth', 'Value': str(target_month)}
+            # Try each instance type until one succeeds
+            last_error = None
+            for i, try_instance_type in enumerate(instance_types):
+                try:
+                    logger.info(f"Attempting to launch {try_instance_type} (attempt {i+1}/{len(instance_types)})")
+                    
+                    # Use run_instances with market options instead of request_spot_instances
+                    # This allows us to use the launch template which contains our user_data_processor.sh
+                    # Override the subnet and security group to ensure they match our current VPC
+                    response = self.ec2_client.run_instances(
+                        MaxCount=1,
+                        MinCount=1,
+                        InstanceType=try_instance_type,  # Override instance type
+                        LaunchTemplate={
+                            'LaunchTemplateId': self.launch_template_id,
+                            'Version': '$Latest'
+                        },
+                        SubnetId=self.subnet_id,  # Override subnet from discovery
+                        SecurityGroupIds=[self.security_group_id],  # Override security group from discovery
+                        InstanceMarketOptions={
+                            'MarketType': 'spot',
+                            'SpotOptions': {
+                                'MaxPrice': max_price,
+                                'SpotInstanceType': 'one-time',
+                                'InstanceInterruptionBehavior': 'terminate'
+                            }
+                        },
+                        TagSpecifications=[
+                            {
+                                'ResourceType': 'instance',
+                                'Tags': [
+                                    {'Key': 'Name', 'Value': 'aqua-hive-processor-spot'},
+                                    {'Key': 'Project', 'Value': 'aqua-hive'},
+                                    {'Key': 'Type', 'Value': 'processor'},
+                                    {'Key': 'ProcessingYear', 'Value': str(target_year)},
+                                    {'Key': 'ProcessingMonth', 'Value': str(target_month)},
+                                    {'Key': 'InstanceType', 'Value': try_instance_type}
+                                ]
+                            }
                         ]
-                    }
-                ]
-            )
+                    )
+                    
+                    instance_id = response['Instances'][0]['InstanceId']
+                    logger.info(f"Spot instance launched successfully: {instance_id} ({try_instance_type})")
+                    
+                    return instance_id
+                    
+                except Exception as e:
+                    last_error = e
+                    if "InsufficientInstanceCapacity" in str(e) or "SpotMaxPriceTooLow" in str(e):
+                        logger.warning(f"No capacity for {try_instance_type}: {e}")
+                        if i < len(instance_types) - 1:
+                            logger.info(f"Trying next instance type...")
+                            continue
+                    else:
+                        # For other errors, don't retry with different instance types
+                        logger.error(f"Error launching {try_instance_type}: {e}")
+                        raise
             
-            instance_id = response['Instances'][0]['InstanceId']
-            logger.info(f"Spot instance launched: {instance_id}")
-            
-            return instance_id
+            # If we get here, all instance types failed
+            raise Exception(f"Failed to launch spot instance with any instance type. Last error: {last_error}")
             
         except Exception as e:
             logger.error(f"Error requesting spot instance: {e}")
