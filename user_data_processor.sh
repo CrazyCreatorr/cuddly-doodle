@@ -182,6 +182,123 @@ setup_s3_buckets() {
     log "Using buckets - Raw: $raw_bucket, Tiles: $tiles_bucket"
 }
 
+# Extract MBTiles to PBF tiles and sync to S3
+extract_and_sync_tiles() {
+    log "Starting MBTiles extraction and S3 sync..."
+    
+    # Check if we have tiles bucket configured
+    if [ -z "${CLIMATE_TILES_BUCKET:-}" ]; then
+        log "WARNING: No tiles bucket configured, skipping tile extraction"
+        return 0
+    fi
+    
+    # Process each parameter
+    for param in "${script_params[@]}"; do
+        local mbtiles_dir="${param}_mbtiles_output"
+        
+        if [ -d "$mbtiles_dir" ]; then
+            log "Processing $param MBTiles for extraction..."
+            
+            # Find all MBTiles files for this parameter
+            local mbtiles_files=$(find "$mbtiles_dir" -name "*.mbtiles" 2>/dev/null)
+            
+            if [ ! -z "$mbtiles_files" ]; then
+                # Create extraction directory
+                local extract_dir="/tmp/${param}_tiles_extract"
+                mkdir -p "$extract_dir"
+                
+                for mbtiles_file in $mbtiles_files; do
+                    log "Extracting tiles from: $mbtiles_file"
+                    
+                    # Extract filename to get year/month info
+                    local filename=$(basename "$mbtiles_file" .mbtiles)
+                    local year_month=""
+                    
+                    # Try to extract year and month from filename
+                    # Expected formats: precipitation_05_2025.mbtiles, temperature_2025_05.mbtiles, etc.
+                    if [[ "$filename" =~ ([0-9]{4}).*([0-9]{2}) ]]; then
+                        local year="${BASH_REMATCH[1]}"
+                        local month="${BASH_REMATCH[2]}"
+                        year_month="${year}/${month}"
+                    elif [[ "$filename" =~ ([0-9]{2}).*([0-9]{4}) ]]; then
+                        local month="${BASH_REMATCH[1]}"
+                        local year="${BASH_REMATCH[2]}"
+                        year_month="${year}/${month}"
+                    else
+                        # Fallback to target year/month
+                        year_month="${target_year}/$(printf "%02d" $target_month)"
+                    fi
+                    
+                    # Create parameter/year/month directory structure
+                    local tile_output_dir="$extract_dir/$param/$year_month"
+                    mkdir -p "$tile_output_dir"
+                    
+                    # Extract MBTiles to directory structure using mb-util or custom extractor
+                    log "Extracting $mbtiles_file to $tile_output_dir"
+                    
+                    # Try mb-util first
+                    if command -v mb-util >/dev/null 2>&1; then
+                        if mb-util "$mbtiles_file" "$tile_output_dir" --image_format=pbf 2>/dev/null; then
+                            log "Successfully extracted $mbtiles_file using mb-util"
+                        else
+                            log "mb-util failed, trying custom extractor..."
+                            # Use our custom extractor
+                            if [ -f "/usr/local/bin/extract-mbtiles" ]; then
+                                python3 /usr/local/bin/extract-mbtiles "$mbtiles_file" "$tile_output_dir" || log "Custom extractor failed for $mbtiles_file"
+                            else
+                                log "No tile extractor available for $mbtiles_file"
+                                continue
+                            fi
+                        fi
+                    else
+                        # Use custom extractor if mb-util not available
+                        if [ -f "/usr/local/bin/extract-mbtiles" ]; then
+                            log "Using custom MBTiles extractor..."
+                            python3 /usr/local/bin/extract-mbtiles "$mbtiles_file" "$tile_output_dir" || log "Custom extractor failed for $mbtiles_file"
+                        else
+                            log "No tile extractor available for $mbtiles_file"
+                            continue
+                        fi
+                    fi
+                    
+                    # Rename .mvt files to .pbf if they exist
+                    log "Renaming .mvt files to .pbf format..."
+                    find "$tile_output_dir" -name "*.mvt" -exec rename 's/\.mvt$/.pbf/' {} \; 2>/dev/null || true
+                    
+                    # Also handle case where files have no extension
+                    find "$tile_output_dir" -type f ! -name "*.pbf" ! -name "*.json" ! -name "*.txt" -exec mv {} {}.pbf \; 2>/dev/null || true
+                done
+                
+                # Sync extracted tiles to S3 in the proper structure: {param}/{year}/{month}/{z}/{x}/{y}.pbf
+                if [ -d "$extract_dir" ] && [ "$(ls -A $extract_dir 2>/dev/null)" ]; then
+                    log "Syncing extracted tiles to S3: s3://${CLIMATE_TILES_BUCKET}/"
+                    
+                    # Sync the entire parameter directory structure
+                    aws s3 sync "$extract_dir/" "s3://${CLIMATE_TILES_BUCKET}/" \
+                        --exclude "*.json" \
+                        --exclude "*.txt" \
+                        --include "*.pbf" \
+                        --content-type "application/x-protobuf" \
+                        --metadata-directive REPLACE || log "Warning: Failed to sync tiles to S3"
+                    
+                    log "Tile sync completed for $param"
+                    
+                    # Clean up extraction directory
+                    rm -rf "$extract_dir"
+                else
+                    log "No tiles extracted for $param"
+                fi
+            else
+                log "No MBTiles files found in $mbtiles_dir"
+            fi
+        else
+            log "MBTiles directory $mbtiles_dir not found for $param"
+        fi
+    done
+    
+    log "MBTiles extraction and S3 sync completed!"
+}
+
 # Run the climate data processing pipelines
 run_processor() {
     log "Starting climate data processing..."
@@ -295,7 +412,10 @@ run_processor() {
         fi
     done
     
-    log "All processing completed successfully!"
+    log "All pipeline processing completed successfully!"
+    
+    # Extract MBTiles to PBF tiles and sync to S3
+    extract_and_sync_tiles
     
     # Send completion notification to CloudWatch logs
     log "Sending completion notification..."
