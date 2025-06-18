@@ -6,28 +6,7 @@ set -euo pipefail
 # Configuration
 LOG_FILE="/var/log/user-data-processor.log"
 REGION="ap-south-1"
-REPO_URL="https://github.com/CrazyCreat        log "Processing $param data..."
-        
-        # Look for the main pipeline script in repository root, parameter-specific directory, or any subdirectory
-        local pipeline_script=""
-        
-        # First check if script exists in parameter directory
-        if [ -f "${param}/${param}_pipeline.py" ]; then
-            pipeline_script="${param}/${param}_pipeline.py"
-            log "Found pipeline script in parameter directory: $pipeline_script"
-        # Then check if it exists in the repository root
-        elif [ -f "${param}_pipeline.py" ]; then
-            pipeline_script="${param}_pipeline.py"
-            log "Found pipeline script in repository root: $pipeline_script"
-        # Look for scripts in any subdirectory (fallback method)
-        else
-            log "Searching for ${param}_pipeline.py in subdirectories..."
-            local found_script=$(find . -name "${param}_pipeline.py" | head -1)
-            if [ ! -z "$found_script" ]; then
-                pipeline_script="$found_script"
-                log "Found pipeline script in subdirectory: $pipeline_script"
-            fi
-        fioodle.git"
+REPO_URL="https://github.com/CrazyCreatorr/cuddly-doodle.git"
 SCRIPTS_DIR="/opt/climate-processor"
 
 # Logging function
@@ -120,151 +99,106 @@ setup_pipeline_scripts() {
         chmod -R 755 "$SCRIPTS_DIR"
         chown -R ubuntu:ubuntu "$SCRIPTS_DIR"
         
-        # Make all shell scripts executable
-        find "$SCRIPTS_DIR" -name "*.sh" -type f -exec chmod +x {} \;
+        # Change to the repository directory
+        cd "$SCRIPTS_DIR"
         
-        log "Pipeline scripts setup completed successfully"
-        log "Available contents:"
-        ls -la "$SCRIPTS_DIR"/ | tee -a "$LOG_FILE"
+        log "Repository contents:"
+        ls -la | tee -a "$LOG_FILE"
+        
     else
-        error_exit "Failed to clone pipeline repository"
+        error_exit "Failed to clone pipeline repository from $REPO_URL"
     fi
 }
 
-# Get S3 bucket names dynamically and create if they don't exist
-get_s3_buckets() {
-    log "Discovering S3 buckets..."
+# Create or discover S3 buckets for storing processed data
+setup_s3_buckets() {
+    log "Setting up S3 buckets for climate data storage..."
     
-    # Generate unique bucket name suffix based on account ID
-    local account_id
-    account_id=$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null || echo "default")
-    local bucket_suffix="-${account_id:(-6)}"
-    
-    # Get raw data bucket
+    # Discover existing aqua-hive buckets (they should already exist from Terraform)
     local raw_bucket
     raw_bucket=$(aws s3api list-buckets \
-        --query 'Buckets[?contains(Name, `climate-raw-data`) || contains(Name, `raw-data`)].Name' \
+        --query 'Buckets[?contains(Name, `aqua-hive-raw-data`)].Name' \
         --output text 2>/dev/null | head -1)
     
     if [ -z "$raw_bucket" ]; then
+        # Fallback to any raw data bucket pattern
         raw_bucket=$(aws s3api list-buckets \
-            --query 'Buckets[?contains(Name, `aqua-hive-raw`)].Name' \
+            --query 'Buckets[?contains(Name, `raw-data`) || contains(Name, `climate-raw`)].Name' \
             --output text 2>/dev/null | head -1)
     fi
     
-    # Create raw bucket if it doesn't exist
     if [ -z "$raw_bucket" ]; then
-        log "Raw data bucket not found, creating one..."
-        raw_bucket="climate-raw-data${bucket_suffix}"
-        
-        # Check if the bucket name is available
-        if aws s3api head-bucket --bucket "$raw_bucket" 2>/dev/null; then
-            # Bucket exists but we don't have access - add timestamp to make unique
-            raw_bucket="climate-raw-data-$(date +%Y%m%d)${bucket_suffix}"
-        fi
-        
-        # Create the bucket
-        if aws s3 mb "s3://$raw_bucket" --region "$REGION"; then
-            # Set lifecycle policy to transition objects to Glacier after 30 days and DEEP_ARCHIVE after 120 days
-            log "Setting lifecycle policy for raw data bucket..."
-            aws s3api put-bucket-lifecycle-configuration \
-                --bucket "$raw_bucket" \
-                --lifecycle-configuration '{
-                    "Rules": [
-                        {
-                            "ID": "Archive Transitions",
-                            "Status": "Enabled",
-                            "Prefix": "",
-                            "Transitions": [
-                                {
-                                    "Days": 30,
-                                    "StorageClass": "GLACIER"
-                                },
-                                {
-                                    "Days": 120,
-                                    "StorageClass": "DEEP_ARCHIVE"
-                                }
-                            ]
-                        }
-                    ]
-                }'
-            log "Raw data bucket created: $raw_bucket"
-        else
-            error_exit "Failed to create raw data bucket"
-        fi
+        log "WARNING: No raw data bucket found. Data upload may fail."
+        raw_bucket="aqua-hive-raw-data-$(date +%Y%m%d)"
     fi
     
     # Get tiles bucket
     local tiles_bucket
     tiles_bucket=$(aws s3api list-buckets \
-        --query 'Buckets[?contains(Name, `climate-tiles`) || contains(Name, `mbtiles`)].Name' \
+        --query 'Buckets[?contains(Name, `aqua-hive-tiles`)].Name' \
         --output text 2>/dev/null | head -1)
     
     if [ -z "$tiles_bucket" ]; then
+        # Fallback to any tiles bucket pattern
         tiles_bucket=$(aws s3api list-buckets \
-            --query 'Buckets[?contains(Name, `aqua-hive-tiles`)].Name' \
+            --query 'Buckets[?contains(Name, `tiles`) || contains(Name, `mbtiles`)].Name' \
             --output text 2>/dev/null | head -1)
     fi
     
-    # Create tiles bucket if it doesn't exist
     if [ -z "$tiles_bucket" ]; then
-        log "Tiles bucket not found, creating one..."
-        tiles_bucket="climate-tiles${bucket_suffix}"
-        
-        # Check if the bucket name is available
-        if aws s3api head-bucket --bucket "$tiles_bucket" 2>/dev/null; then
-            # Bucket exists but we don't have access - add timestamp to make unique
-            tiles_bucket="climate-tiles-$(date +%Y%m%d)${bucket_suffix}"
-        fi
-        
-        # Create the bucket
-        if aws s3 mb "s3://$tiles_bucket" --region "$REGION"; then
-            # Set CORS policy for web access
-            log "Setting CORS policy for tiles bucket..."
-            aws s3api put-bucket-cors \
-                --bucket "$tiles_bucket" \
-                --cors-configuration '{
-                    "CORSRules": [
-                        {
-                            "AllowedHeaders": ["*"],
-                            "AllowedMethods": ["GET"],
-                            "AllowedOrigins": ["*"],
-                            "MaxAgeSeconds": 3000
-                        }
-                    ]
-                }'
+        log "WARNING: No tiles bucket found. Tile upload may fail."
+        tiles_bucket="aqua-hive-tiles-$(date +%Y%m%d)"
+    fi
+    
+    # Export bucket names for use by pipeline scripts
+    export CLIMATE_RAW_BUCKET="$raw_bucket"
+    export CLIMATE_TILES_BUCKET="$tiles_bucket"
+    
+    log "Using buckets - Raw: $raw_bucket, Tiles: $tiles_bucket"
+}
+                "Statement": [
+                    {
+                        "Sid": "PublicReadGetObject",
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "s3:GetObject",
+                        "Resource": "arn:aws:s3:::'$tiles_bucket'/*"
+                    }
+                ]
+            }'
             log "Tiles bucket created: $tiles_bucket"
         else
             error_exit "Failed to create tiles bucket"
         fi
     fi
     
-    log "Found S3 buckets - Raw: $raw_bucket, Tiles: $tiles_bucket"
-    echo "$raw_bucket|$tiles_bucket"
+    # Export bucket names for use by pipeline scripts
+    export CLIMATE_RAW_BUCKET="$raw_bucket"
+    export CLIMATE_TILES_BUCKET="$tiles_bucket"
+    
+    log "Using buckets - Raw: $raw_bucket, Tiles: $tiles_bucket"
 }
 
-# Main processor logic
+# Run the climate data processing pipelines
 run_processor() {
-    log "Starting processor setup..."
+    log "Starting climate data processing..."
     
-    # Get S3 bucket names
-    local bucket_info
-    bucket_info=$(get_s3_buckets)
-    IFS='|' read -r raw_bucket tiles_bucket <<< "$bucket_info"
+    # Ensure we're in the scripts directory
+    if [ ! -d "$SCRIPTS_DIR" ]; then
+        error_exit "Scripts directory $SCRIPTS_DIR does not exist"
+    fi
     
-    # Set environment variables for the processing scripts
-    export RAW_BUCKET="$raw_bucket"
-    export TILES_BUCKET="$tiles_bucket"
-    export AWS_REGION="$REGION"
+    log "Changing to directory: $SCRIPTS_DIR"
+    cd "$SCRIPTS_DIR" || error_exit "Failed to change to scripts directory"
     
-    # Change to the cloned repository directory
-    cd "$SCRIPTS_DIR"
+    log "Current directory: $(pwd)"
+    log "Contents of current directory:"
+    ls -la | tee -a "$LOG_FILE"
     
-    log "Repository structure:"
-    find . -type f -name "*.py" -o -name "*.sh" | head -20 | tee -a "$LOG_FILE"
-    
-    # Check if pipeline scripts exist and execute them
+    # Define the parameters to process (temperature, humidity, precipitation)
     local script_params=("temperature" "humidity" "precipitation")
+    
+    log "Starting processing loop for parameters: ${script_params[*]}"
     
     for param in "${script_params[@]}"; do
         log "Processing $param data..."
@@ -275,101 +209,55 @@ run_processor() {
         # First check if script exists in parameter directory
         if [ -f "${param}/${param}_pipeline.py" ]; then
             pipeline_script="${param}/${param}_pipeline.py"
+            log "Found pipeline script in parameter directory: $pipeline_script"
         # Then check if it exists in the repository root
         elif [ -f "${param}_pipeline.py" ]; then
             pipeline_script="${param}_pipeline.py"
+            log "Found pipeline script in repository root: $pipeline_script"
+        # Look for scripts in any subdirectory (fallback method)
+        else
+            log "Searching for ${param}_pipeline.py in subdirectories..."
+            local found_script=$(find . -name "${param}_pipeline.py" | head -1)
+            if [ ! -z "$found_script" ]; then
+                pipeline_script="$found_script"
+                log "Found pipeline script in subdirectory: $pipeline_script"
+            fi
         fi
         
         if [ ! -z "$pipeline_script" ]; then
-            log "Found pipeline script: $pipeline_script"
+            log "Executing pipeline script: $pipeline_script"
             
-            # Check for requirements.txt in parameter directory or root
-            if [ -f "${param}/requirements.txt" ]; then
-                log "Installing dependencies from ${param}/requirements.txt"
-                pip3 install -r "${param}/requirements.txt"
-            elif [ -f "requirements.txt" ]; then
-                log "Installing dependencies from root requirements.txt"
-                pip3 install -r "requirements.txt"
-            fi
+            # Make script executable and run it
+            chmod +x "$pipeline_script" 2>/dev/null || true
             
-            log "Executing $pipeline_script for $param processing..."
-                
-            # Execute the pipeline script
-            cd "$SCRIPTS_DIR" # Ensure we're in the correct directory
-            if python3 "$pipeline_script"; then
+            if python3 "$pipeline_script" 2>&1 | tee -a "$LOG_FILE"; then
                 log "Successfully processed $param data"
                 
-                # Upload any generated data to S3
-                log "Uploading $param data to S3..."
-                
-                # Upload CSV files to raw bucket - check multiple possible output directories
-                log "Looking for CSV output files to upload to S3..."
-                for data_dir in ${param}_data_output *_data_output ${param}/data_output ${param}/${param}_data_output; do
-                    if [ -d "$data_dir" ] && ls $data_dir/*.csv 2>/dev/null; then
-                        log "Found CSV files in $data_dir, uploading to S3..."
-                        aws s3 sync $data_dir/ "s3://$raw_bucket/$param/$(date +%Y)/$(date +%m)/" \
-                            --exclude "*" --include "*.csv" --storage-class GLACIER
+                # If MBTiles were generated, upload them to S3
+                if [ ! -z "${CLIMATE_TILES_BUCKET:-}" ]; then
+                    log "Looking for generated MBTiles for $param..."
+                    local mbtiles_files=$(find . -name "*${param}*.mbtiles" -o -name "*${param}*.zip" 2>/dev/null)
+                    if [ ! -z "$mbtiles_files" ]; then
+                        log "Found MBTiles files for $param, uploading to S3..."
+                        for mbtile_file in $mbtiles_files; do
+                            log "Uploading $mbtile_file to s3://${CLIMATE_TILES_BUCKET}/"
+                            aws s3 cp "$mbtile_file" "s3://${CLIMATE_TILES_BUCKET}/" || log "Warning: Failed to upload $mbtile_file"
+                        done
                     fi
-                done
-                
-                # Upload MBTiles to tiles bucket as individual tiles - check multiple possible output directories
-                log "Looking for MBTiles files to upload to S3..."
-                local mbtiles_found=false
-                for mbtiles_dir in ${param}_mbtiles_output *_mbtiles_output ${param}/mbtiles_output ${param}/${param}_mbtiles_output; do
-                    if [ -d "$mbtiles_dir" ] && ls $mbtiles_dir/*.mbtiles 2>/dev/null; then
-                        mbtiles_found=true
-                        log "Found MBTiles in $mbtiles_dir"
-                    fi
-                done
-                
-                if $mbtiles_found; then
-                    for mbtiles_file in ${param}_mbtiles_output/*.mbtiles *_mbtiles_output/*.mbtiles ${param}/mbtiles_output/*.mbtiles ${param}/${param}_mbtiles_output/*.mbtiles 2>/dev/null; do
-                        if [ ! -f "$mbtiles_file" ]; then continue; fi
-                        log "Extracting tiles from $mbtiles_file"
+                    
+                    # Look for tiles in expected output directories
+                    for tiles_dir in "${param}_mbtiles_output" "${param}_tiles" "tiles"; do
+                        if [ -d "$tiles_dir" ]; then
+                            log "Found tiles directory: $tiles_dir, uploading contents..."
+                            aws s3 sync "$tiles_dir" "s3://${CLIMATE_TILES_BUCKET}/${param}/" || log "Warning: Failed to sync $tiles_dir"
                             
-                            # Create temporary directory for tile extraction
-                            local temp_tiles_dir="/tmp/tiles_${param}_$(date +%s)"
-                            mkdir -p "$temp_tiles_dir"
-                            
-                            # Extract tiles using mb-util if available, otherwise use Python
-                            if command -v mb-util &> /dev/null; then
-                                mb-util "$mbtiles_file" "$temp_tiles_dir" --image_format=pbf
-                            else
-                                # Use Python to extract tiles
-                                python3 -c "
-import sqlite3
-import os
-from pathlib import Path
-
-def extract_mbtiles_to_pbf(mbtiles_path, output_dir):
-    conn = sqlite3.connect('$mbtiles_file')
-    cursor = conn.cursor()
-    cursor.execute('SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles')
-    
-    for row in cursor.fetchall():
-        zoom, x, y, data = row
-        tile_dir = Path('$temp_tiles_dir') / str(zoom) / str(x)
-        tile_dir.mkdir(parents=True, exist_ok=True)
-        
-        tile_path = tile_dir / f'{y}.pbf'
-        with open(tile_path, 'wb') as f:
-            f.write(data)
-    
-    conn.close()
-
-extract_mbtiles_to_pbf('$mbtiles_file', '$temp_tiles_dir')
-"
-                            fi
-                            
-                            # Upload extracted tiles to S3
-                            if [ -d "$temp_tiles_dir" ]; then
-                                aws s3 sync "$temp_tiles_dir" "s3://$tiles_bucket/$param/$(date +%Y)/$(date +%m)/" \
-                                    --content-type "application/x-protobuf" \
-                                    --cache-control "max-age=2592000"
-                                
-                                # Clean up temporary directory
+                            # Clean up local tiles to save space
+                            local temp_tiles_dir="/tmp/${param}_tiles_$(date +%s)"
+                            if mv "$tiles_dir" "$temp_tiles_dir" 2>/dev/null; then
+                                log "Moved $tiles_dir to temporary location for cleanup"
                                 rm -rf "$temp_tiles_dir"
                             fi
+                        fi
                     done
                 fi
             else
@@ -413,9 +301,24 @@ extract_mbtiles_to_pbf('$mbtiles_file', '$temp_tiles_dir')
 # Main execution
 main() {
     log "=== Processor Instance Setup Started ==="
+    log "Script directory: $SCRIPTS_DIR"
+    log "Region: $REGION"
+    log "Repository URL: $REPO_URL"
     
+    # Install packages first
+    log "Step 1: Installing packages..."
     install_packages
+    
+    # Setup pipeline scripts
+    log "Step 2: Setting up pipeline scripts..."
     setup_pipeline_scripts
+    
+    # Setup S3 buckets
+    log "Step 3: Setting up S3 buckets..."
+    setup_s3_buckets
+    
+    # Run the actual processing
+    log "Step 4: Running processor..."
     run_processor
     
     log "=== Processor Instance Setup Completed ==="
