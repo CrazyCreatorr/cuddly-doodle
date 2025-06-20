@@ -139,40 +139,42 @@ setup_pipeline_scripts() {
 setup_s3_buckets() {
     log "Setting up S3 buckets for climate data storage..."
     
-    # Discover existing aqua-hive buckets (they should already exist from Terraform)
-    local raw_bucket
-    raw_bucket=$(aws s3api list-buckets \
-        --query 'Buckets[?contains(Name, `aqua-hive-raw-data`)].Name' \
-        --output text 2>/dev/null | head -1)
+    # Use hardcoded bucket names that we know exist from Terraform
+    # These buckets are created by Terraform with specific naming pattern
+    local raw_bucket="aqua-hive-raw-data-82zp4fuh"
+    local tiles_bucket="aqua-hive-tiles-82zp4fuh"
     
-    if [ -z "$raw_bucket" ]; then
-        # Fallback to any raw data bucket pattern
-        raw_bucket=$(aws s3api list-buckets \
-            --query 'Buckets[?contains(Name, `raw-data`) || contains(Name, `climate-raw`)].Name' \
+    # Verify buckets exist (with timeout to prevent hanging)
+    log "Verifying buckets exist..."
+    
+    if timeout 30 aws s3 ls "s3://$tiles_bucket/" >/dev/null 2>&1; then
+        log "Tiles bucket verified: $tiles_bucket"
+    else
+        log "WARNING: Tiles bucket $tiles_bucket not accessible, trying to discover..."
+        # Quick fallback discovery with timeout
+        tiles_bucket=$(timeout 15 aws s3api list-buckets \
+            --query 'Buckets[?contains(Name, `tiles`)].Name' \
             --output text 2>/dev/null | head -1)
+        
+        if [ -z "$tiles_bucket" ]; then
+            log "ERROR: No tiles bucket found"
+            tiles_bucket="aqua-hive-tiles-82zp4fuh"  # fallback to expected name
+        fi
     fi
     
-    if [ -z "$raw_bucket" ]; then
-        log "WARNING: No raw data bucket found. Data upload may fail."
-        raw_bucket="aqua-hive-raw-data-$(date +%Y%m%d)"
-    fi
-    
-    # Get tiles bucket
-    local tiles_bucket
-    tiles_bucket=$(aws s3api list-buckets \
-        --query 'Buckets[?contains(Name, `aqua-hive-tiles`)].Name' \
-        --output text 2>/dev/null | head -1)
-    
-    if [ -z "$tiles_bucket" ]; then
-        # Fallback to any tiles bucket pattern
-        tiles_bucket=$(aws s3api list-buckets \
-            --query 'Buckets[?contains(Name, `tiles`) || contains(Name, `mbtiles`)].Name' \
+    if timeout 30 aws s3 ls "s3://$raw_bucket/" >/dev/null 2>&1; then
+        log "Raw bucket verified: $raw_bucket"
+    else
+        log "WARNING: Raw bucket $raw_bucket not accessible, trying to discover..."
+        # Quick fallback discovery with timeout
+        raw_bucket=$(timeout 15 aws s3api list-buckets \
+            --query 'Buckets[?contains(Name, `raw-data`)].Name' \
             --output text 2>/dev/null | head -1)
-    fi
-    
-    if [ -z "$tiles_bucket" ]; then
-        log "WARNING: No tiles bucket found. Tile upload may fail."
-        tiles_bucket="aqua-hive-tiles-$(date +%Y%m%d)"
+        
+        if [ -z "$raw_bucket" ]; then
+            log "ERROR: No raw bucket found"
+            raw_bucket="aqua-hive-raw-data-82zp4fuh"  # fallback to expected name
+        fi
     fi
     
     # Export bucket names for use by pipeline scripts
